@@ -1,0 +1,16 @@
+ /home/abhinav/zephyr-sdk-0.17.0/xtensa-dc233c_zephyr-elf/bin/../lib/gcc/xtensa->
+/home/abhinav/zephyrproject/optional/modules/lib/tflite-micro/./tensorflow/lite>
+/home/abhinav/zephyr-sdk-0.17.0/xtensa-dc233c_zephyr-elf/bin/../lib/gcc/xtensa->
+/home/abhinav/zephyrproject/optional/modules/lib/tflite-micro/./tensorflow/lite>
+/home/abhinav/zephyr-sdk-0.17.0/xtensa-dc233c_zephyr-elf/bin/../lib/gcc/xtensa->
+/home/abhinav/zephyrproject/optional/modules/lib/tflite-micro/./tensorflow/lite>
+/home/abhinav/zephyr-sdk-0.17.0/xtensa-dc233c_zephyr-elf/bin/../lib/gcc/xtensa->
+/home/abhinav/zephyrproject/optional/modules/lib/tflite-micro/./tensorflow/lite>
+/home/abhinav/zephyr-sdk-0.17.0/xtensa-dc233c_zephyr-elf/bin/../lib/gcc/xtensa->
+/home/abhinav/zephyrproject/zephyr/samples/modules/tflite-micro/micro_speech_fi>
+/home/abhinav/zephyr-sdk-0.17.0/xtensa-dc233c_zephyr-elf/bin/../lib/gcc/xtensa->
+/home/abhinav/zephyrproject/zephyr/samples/modules/tflite-micro/micro_speech_fi>
+/home/abhinav/zephyr-sdk-0.17.0/xtensa-dc233c_zephyr-elf/bin/../lib/gcc/xtensa->
+/home/abhinav/zephyrproject/optional/modules/lib/tflite-micro/./tensorflow/lite>
+collect2: error: ld returned 1 exit status
+ninja: build stopped: subcommand failed.
