@@ -16,8 +16,8 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <iterator>
-
-
+#include <main_functions.cpp>
+#include "tensorflow/lite/core/c/common.h"
 #include "micro_model_settings.h"
 #include "audio_preprocessor_int8_model_data.h"
 #include "micro_speech_quantized_model_data.h"
@@ -27,41 +27,44 @@ limitations under the License.
 #include "silence_1000ms_audio_data.h"
 #include "yes_1000ms_audio_data.h"
 #include "yes_30ms_audio_data.h"
-#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_log.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/micro/testing/micro_test.h"
-
-namespace {
-
-// Arena size is a guesstimate, followed by use of
-// MicroInterpreter::arena_used_bytes() on both the AudioPreprocessor and
-// MicroSpeech models and using the larger of the two results.
-constexpr size_t kArenaSize = 28584;  // xtensa p6
+onstexpr size_t kArenaSize = 28584;
 alignas(16) uint8_t g_arena[kArenaSize];
 
 using Features = int8_t[kFeatureCount][kFeatureSize];
 Features g_features;
 
-constexpr int kAudioSampleDurationCount =
-    kFeatureDurationMs * kAudioSampleFrequency / 1000;
-constexpr int kAudioSampleStrideCount =
-    kFeatureStrideMs * kAudioSampleFrequency / 1000;
+// Audio-related constants
+constexpr int kAudioSampleDurationCount = kFeatureDurationMs * kAudioSampleFrequency / 1000;
+constexpr int kAudioSampleStrideCount   = kFeatureStrideMs * kAudioSampleFrequency / 1000;
 
-using MicroSpeechOpResolver = tflite::MicroMutableOpResolver<4>;
-using AudioPreprocessorOpResolver = tflite::MicroMutableOpResolver<18>;
+// Declare global interpreters
+tflite::MicroInterpreter* audio_preproc_interpreter = nullptr;
+tflite::MicroInterpreter* inference_interpreter     = nullptr;
 
-TfLiteStatus RegisterOps(MicroSpeechOpResolver& op_resolver) {
+// ------------------------ Function Prototypes -------------------------------
+void setup();
+void loop();
+
+bool initializeAudioPreprocessorModel();
+bool initializeInferenceModel();
+bool runFeatureExtraction(const int16_t* audio_data, size_t audio_data_size);
+bool runInference(const char* expected_label);
+
+// ------------------------ Register All Ops ----------------------------------
+using AllOpsResolver = tflite::MicroMutableOpResolver<22>;
+
+TfLiteStatus RegisterAllOps(AllOpsResolver& op_resolver) {
+  // MicroSpeech ops
   TF_LITE_ENSURE_STATUS(op_resolver.AddReshape());
   TF_LITE_ENSURE_STATUS(op_resolver.AddFullyConnected());
   TF_LITE_ENSURE_STATUS(op_resolver.AddDepthwiseConv2D());
   TF_LITE_ENSURE_STATUS(op_resolver.AddSoftmax());
-  return kTfLiteOk;
-}
 
-TfLiteStatus RegisterOps(AudioPreprocessorOpResolver& op_resolver) {
-  TF_LITE_ENSURE_STATUS(op_resolver.AddReshape());
+  // Audio Preprocessing ops
   TF_LITE_ENSURE_STATUS(op_resolver.AddCast());
   TF_LITE_ENSURE_STATUS(op_resolver.AddStridedSlice());
   TF_LITE_ENSURE_STATUS(op_resolver.AddConcatenation());
@@ -71,211 +74,150 @@ TfLiteStatus RegisterOps(AudioPreprocessorOpResolver& op_resolver) {
   TF_LITE_ENSURE_STATUS(op_resolver.AddMinimum());
   TF_LITE_ENSURE_STATUS(op_resolver.AddMaximum());
   TF_LITE_ENSURE_STATUS(op_resolver.AddWindow());
- // TF_LITE_ENSURE_STATUS(op_resolver.AddFftAutoScale());
-  //TF_LITE_ENSURE_STATUS(op_resolver.AddRfft());
-  //TF_LITE_ENSURE_STATUS(op_resolver.AddEnergy());
-  //TF_LITE_ENSURE_STATUS(op_resolver.AddFilterBank());
-  //TF_LITE_ENSURE_STATUS(op_resolver.AddFilterBankSquareRoot());
- // TF_LITE_ENSURE_STATUS(op_resolver.AddFilterBankSpectralSubtraction());
- // TF_LITE_ENSURE_STATUS(op_resolver.AddPCAN());
-  //TF_LITE_ENSURE_STATUS(op_resolver.AddFilterBankLog());
+  TF_LITE_ENSURE_STATUS(op_resolver.AddFftAutoScale());
+  TF_LITE_ENSURE_STATUS(op_resolver.AddRfft());
+  TF_LITE_ENSURE_STATUS(op_resolver.AddEnergy());
+  TF_LITE_ENSURE_STATUS(op_resolver.AddFilterBank());
+  TF_LITE_ENSURE_STATUS(op_resolver.AddFilterBankSquareRoot());
+  TF_LITE_ENSURE_STATUS(op_resolver.AddFilterBankSpectralSubtraction());
+  TF_LITE_ENSURE_STATUS(op_resolver.AddPCAN());
+  TF_LITE_ENSURE_STATUS(op_resolver.AddFilterBankLog());
+
   return kTfLiteOk;
 }
 
-TfLiteStatus LoadMicroSpeechModelAndPerformInference(
-    const Features& features, const char* expected_label) {
-  // Map the model into a usable data structure. This doesn't involve any
-  // copying or parsing, it's a very lightweight operation.
-  const tflite::Model* model =
-      tflite::GetModel(micro_speech_quantized_tflite);
-  TF_LITE_MICRO_EXPECT(model->version() == TFLITE_SCHEMA_VERSION);
-  TF_LITE_MICRO_CHECK_FAIL();
+// ------------------------ Model Initialization -------------------------------
 
-  MicroSpeechOpResolver op_resolver;
-  TF_LITE_MICRO_EXPECT(RegisterOps(op_resolver) == kTfLiteOk);
-  TF_LITE_MICRO_CHECK_FAIL();
+// Setup function for audio preprocessor model
+bool initializeAudioPreprocessorModel() {
+  const tflite::Model* model = tflite::GetModel(g_audio_preprocessor_int8_model_data);
+  if (model->version() != TFLITE_SCHEMA_VERSION) return false;
 
-  tflite::MicroInterpreter interpreter(model, op_resolver, g_arena, kArenaSize);
+  static AllOpsResolver resolver;
+  if (RegisterAllOps(resolver) != kTfLiteOk) return false;
 
-  TF_LITE_MICRO_EXPECT(interpreter.AllocateTensors() == kTfLiteOk);
-  TF_LITE_MICRO_CHECK_FAIL();
+  static tflite::MicroInterpreter local_interpreter(model, resolver, g_arena, kArenaSize);
+  if (local_interpreter.AllocateTensors() != kTfLiteOk) return false;
 
-  MicroPrintf("MicroSpeech model arena size = %u",
-              interpreter.arena_used_bytes());
+  audio_preproc_interpreter = &local_interpreter;
+  MicroPrintf("AudioPreprocessor arena used: %u", audio_preproc_interpreter->arena_used_bytes());
+  return true;
+}
 
-  TfLiteTensor* input = interpreter.input(0);
-  TF_LITE_MICRO_EXPECT(input != nullptr);
-  TF_LITE_MICRO_CHECK_FAIL();
-  // check input shape is compatible with our feature data size
-  TF_LITE_MICRO_EXPECT_EQ(kFeatureElementCount,
-                          input->dims->data[input->dims->size - 1]);
-  TF_LITE_MICRO_CHECK_FAIL();
+// Setup function for inference model
+bool initializeInferenceModel() {
+  const tflite::Model* model = tflite::GetModel(g_micro_speech_quantized_model_data);
+  if (model->version() != TFLITE_SCHEMA_VERSION) return false;
 
-  TfLiteTensor* output = interpreter.output(0);
-  TF_LITE_MICRO_EXPECT(output != nullptr);
-  TF_LITE_MICRO_CHECK_FAIL();
-  // check output shape is compatible with our number of prediction categories
-  TF_LITE_MICRO_EXPECT_EQ(kCategoryCount,
-                          output->dims->data[output->dims->size - 1]);
-  TF_LITE_MICRO_CHECK_FAIL();
+  static AllOpsResolver resolver;
+  if (RegisterAllOps(resolver) != kTfLiteOk) return false;
+
+  static tflite::MicroInterpreter local_interpreter(model, resolver, g_arena, kArenaSize);
+  if (local_interpreter.AllocateTensors() != kTfLiteOk) return false;
+
+  inference_interpreter = &local_interpreter;
+  MicroPrintf("MicroSpeech arena used: %u", inference_interpreter->arena_used_bytes());
+  return true;
+}
+
+// ------------------------ Feature Generation -------------------------------
+
+// Extracts one feature vector from audio
+TfLiteStatus GenerateSingleFeature(const int16_t* audio_data,
+                                   const int audio_data_size,
+                                   int8_t* feature_output) {
+  TfLiteTensor* input  = audio_preproc_interpreter->input(0);
+  TfLiteTensor* output = audio_preproc_interpreter->output(0);
+
+  if (!input || !output ||
+      audio_data_size != kAudioSampleDurationCount ||
+      input->dims->data[input->dims->size - 1] != kAudioSampleDurationCount ||
+      output->dims->data[output->dims->size - 1] != kFeatureSize)
+    return kTfLiteError;
+
+  std::copy_n(audio_data, audio_data_size, tflite::GetTensorData<int16_t>(input));
+  if (audio_preproc_interpreter->Invoke() != kTfLiteOk) return kTfLiteError;
+  std::copy_n(tflite::GetTensorData<int8_t>(output), kFeatureSize, feature_output);
+  return kTfLiteOk;
+}
+
+// Full feature extraction process for a given audio
+bool runFeatureExtraction(const int16_t* audio_data, size_t audio_data_size) {
+  size_t remaining = audio_data_size;
+  size_t index = 0;
+
+  while (remaining >= kAudioSampleDurationCount && index < kFeatureCount) {
+    if (GenerateSingleFeature(audio_data, kAudioSampleDurationCount, g_features[index]) != kTfLiteOk)
+      return false;
+
+    audio_data += kAudioSampleStrideCount;
+    remaining  -= kAudioSampleStrideCount;
+    index++;
+  }
+  return true;
+}
+
+// ------------------------ Model Inference ---------------------------------
+
+bool runInference(const char* expected_label) {
+  TfLiteTensor* input  = inference_interpreter->input(0);
+  TfLiteTensor* output = inference_interpreter->output(0);
+
+  if (!input || !output ||
+      input->dims->data[input->dims->size - 1] != kFeatureElementCount ||
+      output->dims->data[output->dims->size - 1] != kCategoryCount)
+    return false;
 
   float output_scale = output->params.scale;
   int output_zero_point = output->params.zero_point;
 
-  std::copy_n(&features[0][0], kFeatureElementCount,
-              tflite::GetTensorData<int8_t>(input));
-  TF_LITE_MICRO_EXPECT(interpreter.Invoke() == kTfLiteOk);
-  TF_LITE_MICRO_CHECK_FAIL();
+  std::copy_n(&g_features[0][0], kFeatureElementCount, tflite::GetTensorData<int8_t>(input));
+  if (inference_interpreter->Invoke() != kTfLiteOk) return false;
 
-  // Dequantize output values
-  float category_predictions[kCategoryCount];
-  MicroPrintf("MicroSpeech category predictions for <%s>", expected_label);
+  float predictions[kCategoryCount];
+  MicroPrintf("Predictions for <%s>", expected_label);
+
   for (int i = 0; i < kCategoryCount; i++) {
-    category_predictions[i] =
-        (tflite::GetTensorData<int8_t>(output)[i] - output_zero_point) *
-        output_scale;
-    MicroPrintf("  %.4f %s", static_cast<double>(category_predictions[i]),
-                kCategoryLabels[i]);
-  }
-  int prediction_index =
-      std::distance(std::begin(category_predictions),
-                    std::max_element(std::begin(category_predictions),
-                                     std::end(category_predictions)));
-  TF_LITE_MICRO_EXPECT_STRING_EQ(expected_label,
-                                 kCategoryLabels[prediction_index]);
-  TF_LITE_MICRO_CHECK_FAIL();
-
-  return kTfLiteOk;
-}
-
-TfLiteStatus GenerateSingleFeature(const int16_t* audio_data,
-                                   const int audio_data_size,
-                                   int8_t* feature_output,
-                                   tflite::MicroInterpreter* interpreter) {
-  TfLiteTensor* input = interpreter->input(0);
-  TF_LITE_MICRO_EXPECT(input != nullptr);
-  TF_LITE_MICRO_CHECK_FAIL();
-  // check input shape is compatible with our audio sample size
-  TF_LITE_MICRO_EXPECT_EQ(kAudioSampleDurationCount, audio_data_size);
-  TF_LITE_MICRO_CHECK_FAIL();
-  TF_LITE_MICRO_EXPECT_EQ(kAudioSampleDurationCount,
-                          input->dims->data[input->dims->size - 1]);
-  TF_LITE_MICRO_CHECK_FAIL();
-
-  TfLiteTensor* output = interpreter->output(0);
-  TF_LITE_MICRO_EXPECT(output != nullptr);
-  TF_LITE_MICRO_CHECK_FAIL();
-  // check output shape is compatible with our feature size
-  TF_LITE_MICRO_EXPECT_EQ(kFeatureSize,
-                          output->dims->data[output->dims->size - 1]);
-  TF_LITE_MICRO_CHECK_FAIL();
-
-  std::copy_n(audio_data, audio_data_size,
-              tflite::GetTensorData<int16_t>(input));
-  TF_LITE_MICRO_EXPECT(interpreter->Invoke() == kTfLiteOk);
-  TF_LITE_MICRO_CHECK_FAIL();
-  std::copy_n(tflite::GetTensorData<int8_t>(output), kFeatureSize,
-              feature_output);
-
-  return kTfLiteOk;
-}
-
-TfLiteStatus GenerateFeatures(const int16_t* audio_data,
-                              const size_t audio_data_size,
-                              Features* features_output) {
-  // Map the model into a usable data structure. This doesn't involve any
-  // copying or parsing, it's a very lightweight operation.
-  const tflite::Model* model =
-      tflite::GetModel(audio_preprocessor_int8_tflite);
-  TF_LITE_MICRO_EXPECT(model->version() == TFLITE_SCHEMA_VERSION);
-  TF_LITE_MICRO_CHECK_FAIL();
-
-  AudioPreprocessorOpResolver op_resolver;
-  TF_LITE_MICRO_EXPECT(RegisterOps(op_resolver) == kTfLiteOk);
-  TF_LITE_MICRO_CHECK_FAIL();
-
-  tflite::MicroInterpreter interpreter(model, op_resolver, g_arena, kArenaSize);
-
-  TF_LITE_MICRO_EXPECT(interpreter.AllocateTensors() == kTfLiteOk);
-  TF_LITE_MICRO_CHECK_FAIL();
-
-  MicroPrintf("AudioPreprocessor model arena size = %u",
-              interpreter.arena_used_bytes());
-
-  size_t remaining_samples = audio_data_size;
-  size_t feature_index = 0;
-  while (remaining_samples >= kAudioSampleDurationCount &&
-         feature_index < kFeatureCount) {
-    TF_LITE_ENSURE_STATUS(
-        GenerateSingleFeature(audio_data, kAudioSampleDurationCount,
-                              (*features_output)[feature_index], &interpreter));
-    feature_index++;
-    audio_data += kAudioSampleStrideCount;
-    remaining_samples -= kAudioSampleStrideCount;
+    predictions[i] = (tflite::GetTensorData<int8_t>(output)[i] - output_zero_point) * output_scale;
+    MicroPrintf("  %.4f %s", static_cast<double>(predictions[i]), kCategoryLabels[i]);
   }
 
-  return kTfLiteOk;
+  int pred_index = std::distance(std::begin(predictions),
+                                 std::max_element(std::begin(predictions), std::end(predictions)));
+  return strcmp(expected_label, kCategoryLabels[pred_index]) == 0;
 }
 
-TfLiteStatus TestAudioSample(const char* label, const int16_t* audio_data,
-                             const size_t audio_data_size) {
-  TF_LITE_ENSURE_STATUS(
-      GenerateFeatures(audio_data, audio_data_size, &g_features));
-  TF_LITE_ENSURE_STATUS(
-      LoadMicroSpeechModelAndPerformInference(g_features, label));
-  return kTfLiteOk;
-}
+// ------------------------ Arduino-style Main --------------------------------
 
-}  // namespace
+void setup() {
+  // Initialize Serial / UART if needed here
+  MicroPrintf("Starting MicroSpeech Inference...\n");
 
-TF_LITE_MICRO_TESTS_BEGIN
+  if (!initializeAudioPreprocessorModel()) {
+    MicroPrintf("Error initializing Audio Preprocessor Model");
+    return;
+  }
 
-TF_LITE_MICRO_TEST(NoFeatureTest) {
-  int8_t expected_feature[kFeatureSize] = {
-      126, 103, 124, 102, 124, 102, 123, 100, 118, 97, 118, 100, 118, 98,
-      121, 100, 121, 98,  117, 91,  96,  74,  54,  87, 100, 87,  109, 92,
-      91,  80,  64,  55,  83,  74,  74,  78,  114, 95, 101, 81,
-  };
-
-  TF_LITE_ENSURE_STATUS(GenerateFeatures(
-    reinterpret_cast<const int16_t*>(no_30ms_wav), no_30ms_wav_len, &g_features));
-  for (size_t i = 0; i < kFeatureSize; i++) {
-    TF_LITE_MICRO_EXPECT_EQ(g_features[0][i], expected_feature[i]);
-    TF_LITE_MICRO_CHECK_FAIL();
+  if (!initializeInferenceModel()) {
+    MicroPrintf("Error initializing Inference Model");
+    return;
   }
 }
 
-TF_LITE_MICRO_TEST(YesFeatureTest) {
-  int8_t expected_feature[kFeatureSize] = {
-      124, 105, 126, 103, 125, 101, 123, 100, 116, 98,  115, 97,  113, 90,
-      91,  82,  104, 96,  117, 97,  121, 103, 126, 101, 125, 104, 126, 104,
-      125, 101, 116, 90,  81,  74,  80,  71,  83,  76,  82,  71,
-  };
+void loop() {
+  // Test audio sample repeatedly or continuously in a real device
+  const char* expected = "yes";
 
-  TF_LITE_ENSURE_STATUS(GenerateFeatures(
-    reinterpret_cast<const int16_t*>(yes_30ms_wav), yes_30ms_wav_len, &g_features));
-  for (size_t i = 0; i < kFeatureSize; i++) {
-    TF_LITE_MICRO_EXPECT_EQ(g_features[0][i], expected_feature[i]);
-    TF_LITE_MICRO_CHECK_FAIL();
+  if (!runFeatureExtraction(g_yes_1000ms_audio_data, g_yes_1000ms_audio_data_size)) {
+    MicroPrintf("Feature extraction failed!");
+    return;
   }
-}
 
-TF_LITE_MICRO_TEST(NoTest) {
-  TestAudioSample("no", reinterpret_cast<const int16_t*>(no_1000ms_wav), no_1000ms_wav_len);
-}
+  if (!runInference(expected)) {
+    MicroPrintf(" Prediction mismatch or failed");
+  } else {
+    MicroPrintf(" Prediction matched expected label: %s", expected);
+  }
 
-TF_LITE_MICRO_TEST(YesTest) {
-  TestAudioSample("yes",reinterpret_cast<const int16_t*>(yes_1000ms_wav), yes_1000ms_wav_len);
+  delay(5000);  // Run every few seconds (Arduino-style)
 }
-
-TF_LITE_MICRO_TEST(SilenceTest) {
-  TestAudioSample("silence", reinterpret_cast<const int16_t*>(silence_1000ms_wav),
-                  silence_1000ms_wav_len);
-}
-
-TF_LITE_MICRO_TEST(NoiseTest) {
-  TestAudioSample("silence",reinterpret_cast<const int16_t*>(noise_1000ms_wav),
-                  noise_1000ms_wav_len);
-}
-
-TF_LITE_MICRO_TESTS_END
