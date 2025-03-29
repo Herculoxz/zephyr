@@ -18,6 +18,7 @@ limitations under the License.
 
 // The following values are derived from values used during model training.
 // If you change the way you preprocess the input, update all these constants.
+constexpr int kMaxAudioSampleSize = 512;
 constexpr int kAudioSampleFrequency = 16000;
 constexpr int kFeatureSize = 40;
 constexpr int kFeatureCount = 49;
