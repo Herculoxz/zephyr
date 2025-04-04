@@ -1,9 +1,11 @@
 #include "main_functions.h"
+#include <tensorflow/lite/micro/micro_log.h>
 
 int main() {
-    setup();
-    while (1) {
-        loop();
-    }
-    return 0;
+  MicroPrintf("Starting Micro Speech application");
+  setup();
+  MicroPrintf("Setup completed, running loop once");
+  loop();  // Run loop only once
+  MicroPrintf("Application finished");
+  return 0;
 }

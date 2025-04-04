@@ -13,18 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef SIGNAL_SRC_LOG_H_
-#define SIGNAL_SRC_LOG_H_
+#ifndef TENSORFLOW_LITE_MICRO_EXAMPLES_MICRO_SPEECH_MICRO_FEATURES_YES_MICRO_FEATURES_DATA_H_
+#define TENSORFLOW_LITE_MICRO_EXAMPLES_MICRO_SPEECH_MICRO_FEATURES_YES_MICRO_FEATURES_DATA_H_
 
-#include <stdint.h>
+extern const int g_yes_micro_f2e59fea_nohash_1_width;
+extern const int g_yes_micro_f2e59fea_nohash_1_height;
+extern const signed char g_yes_micro_f2e59fea_nohash_1_data[];
 
-namespace tflite {
-namespace tflm_signal {
-// TODO(b/286250473): remove namespace once de-duped libraries above
-
-// Natural logarithm of an integer. The result is multiplied by out_scale
-uint32_t Log32(uint32_t x, uint32_t out_scale);
-
-}  // namespace tflm_signal
-}  // namespace tflite
-#endif  // SIGNAL_SRC_LOG_H_
+#endif  // TENSORFLOW_LITE_MICRO_EXAMPLES_MICRO_SPEECH_MICRO_FEATURES_YES_MICRO_FEATURES_DATA_H_

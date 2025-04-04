@@ -1,199 +1,169 @@
-/* Copyright 2020-2023 The TensorFlow Authors. All Rights Reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-==============================================================================*/
-
-#include <algorithm>
-#include <cstdint>
-#include <iterator>
-
 #include "main_functions.h"
 
-#include "audio_provider.h"
-#include "command_responder.h"
-#include "feature_provider.h"
-#include "micro_model_settings.h"
-#include "model.h"
-#include "recognize_commands.h"
-#include "tensorflow/lite/micro/system_setup.h"
-#include "tensorflow/lite/schema/schema_generated.h"
-#include "tensorflow/lite/core/c/common.h"
-#include "tensorflow/lite/micro/micro_interpreter.h"
-#include "tensorflow/lite/micro/micro_log.h"
-#include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
-#include "tensorflow/lite/micro/micro_error_reporter.h"
+#include <tensorflow/lite/micro/micro_mutable_op_resolver.h>
+#include "micro_model_settings.h"    // Model-specific constants
+#include "model.h"                  // Pre-trained Micro Speech model (g_model)
+#include "command_responder.h"      // For RespondToCommand
+#include "yes_micro_features_data.h" // Preprocessed "yes" MFCC features
+#include <tensorflow/lite/micro/micro_log.h>
+#include <tensorflow/lite/micro/micro_interpreter.h>
+#include <tensorflow/lite/micro/system_setup.h>
+#include <tensorflow/lite/schema/schema_generated.h>
+#include <zephyr/kernel.h>          // For k_msleep()
 
-
-// Declare a global error reporter
-tflite::ErrorReporter* error_reporter = nullptr;
-// Globals, used for compatibility with Arduino-style sketches.
+/* Globals, used for compatibility with Arduino-style sketches. */
 namespace {
-const tflite::Model* model = nullptr;
-tflite::MicroInterpreter* interpreter = nullptr;
-TfLiteTensor* model_input = nullptr;
-FeatureProvider* feature_provider = nullptr;
-RecognizeCommands* recognizer = nullptr;
-int32_t previous_time = 0;
+  const tflite::Model* model = nullptr;
+  tflite::MicroInterpreter* interpreter = nullptr;
+  TfLiteTensor* input = nullptr;
+  TfLiteTensor* output = nullptr;
+  int inference_count = 0;
+  bool setup_successful = false;  // Flag to track setup success
 
-// Create an area of memory to use for input, output, and intermediate arrays.
-// The size of this will depend on the model you're using, and may need to be
-// determined by experimentation.
-constexpr int kTensorArenaSize = 30 * 1024;
-uint8_t tensor_arena[kTensorArenaSize];
-int8_t feature_buffer[kFeatureElementCount];
-int8_t* model_input_buffer = nullptr;
+  // Tensor arena size (using the constant from micro_model_settings.h)
+  uint8_t tensor_arena[kTensorArenaSize];
 }  // namespace
 
-// The name of this function is important for Arduino compatibility.
-void setup() {
-  // Map the model into a usable data structure. This doesn't involve any
-  // copying or parsing, it's a very lightweight operation.
+/* Setup function - runs once at startup */
+void setup(void) {
+  MicroPrintf("Entering setup()");
+
+  // Initialize hardware (if needed, platform-specific)
+  tflite::InitializeTarget();
+  MicroPrintf("Target initialized");
+
+  // Log the schema version
+  MicroPrintf("Zephyr TFLITE_SCHEMA_VERSION: %d", TFLITE_SCHEMA_VERSION);
+
+  // Log kInputSize
+  MicroPrintf("kInputSize: %d", kInputSize);
+
+  // Load the pre-trained Micro Speech model
   model = tflite::GetModel(g_model);
+  if (model == nullptr) {
+    MicroPrintf("Failed to load model: g_model is nullptr");
+    return;
+  }
   if (model->version() != TFLITE_SCHEMA_VERSION) {
-    MicroPrintf("Model provided is schema version %d not equal to supported "
-                "version %d.", model->version(), TFLITE_SCHEMA_VERSION);
+    MicroPrintf("Model schema version %d does not match supported version %d.",
+                model->version(), TFLITE_SCHEMA_VERSION);
     return;
   }
+  MicroPrintf("Model loaded, version: %d, size: %d bytes", model->version(), g_model_len);
 
-  // Pull in only the operation implementations we need.
-  // This relies on a complete list of all the ops needed by this graph.
-  // An easier approach is to just use the AllOpsResolver, but this will
-  // incur some penalty in code space for op implementations that are not
-  // needed by this graph.
-  //
-  // tflite::AllOpsResolver resolver;
-  // NOLINTNEXTLINE(runtime-global-variables)
-  static tflite::MicroMutableOpResolver<4> micro_op_resolver;
-  if (micro_op_resolver.AddDepthwiseConv2D() != kTfLiteOk) {
-    return;
-  }
-  if (micro_op_resolver.AddFullyConnected() != kTfLiteOk) {
-    return;
-  }
-  if (micro_op_resolver.AddSoftmax() != kTfLiteOk) {
-    return;
-  }
-  if (micro_op_resolver.AddReshape() != kTfLiteOk) {
-    return;
-  }
-  static tflite::MicroErrorReporter micro_error_reporter;
-  error_reporter = &micro_error_reporter;
-  // Build an interpreter to run the model with.
+  // Set up the operation resolver with operations used by Micro Speech
+  static tflite::MicroMutableOpResolver<4> resolver;  // Increased to 10
+
+  resolver.AddDepthwiseConv2D();
+  MicroPrintf("Added DepthwiseConv2D operation");
+  resolver.AddFullyConnected();
+  MicroPrintf("Added FullyConnected operation");
+  resolver.AddSoftmax();
+  MicroPrintf("Added Softmax operation");
+  resolver.AddReshape();
+  MicroPrintf("Added Reshape operation");
+ 
+ 
+  // Build the interpreter
   static tflite::MicroInterpreter static_interpreter(
-      model, micro_op_resolver, tensor_arena, kTensorArenaSize);
+      model, resolver, tensor_arena, kTensorArenaSize);
   interpreter = &static_interpreter;
+  MicroPrintf("Interpreter built");
 
-  // Allocate memory from the tensor_arena for the model's tensors.
+  // Log the number of inputs and outputs
+  MicroPrintf("Model has %d inputs, %d outputs", interpreter->inputs_size(), interpreter->outputs_size());
+
+  // Allocate memory for the model's tensors
   TfLiteStatus allocate_status = interpreter->AllocateTensors();
   if (allocate_status != kTfLiteOk) {
-    MicroPrintf("AllocateTensors() failed");
+    MicroPrintf("AllocateTensors() failed with status: %d", allocate_status);
+    return;
+  }
+  MicroPrintf("Tensors allocated successfully");
+
+  // Get pointers to input and output tensors
+  input = interpreter->input(0);
+  if (input == nullptr) {
+    MicroPrintf("Failed to get input tensor");
+    return;
+  }
+  output = interpreter->output(0);
+  if (output == nullptr) {
+    MicroPrintf("Failed to get output tensor");
+    return;
+  }
+  MicroPrintf("Input/output tensors obtained. Input size: %d bytes, Output size: %d bytes",
+              input->bytes, output->bytes);
+
+  // Explicitly check for input->bytes == 0
+  if (input->bytes == 0) {
+    MicroPrintf("Error: Input tensor size is 0, cannot proceed");
     return;
   }
 
-  // Get information about the memory area to use for the model's input.
-  model_input = interpreter->input(0);
-  if ((model_input->dims->size != 2) || (model_input->dims->data[0] != 1) ||
-      (model_input->dims->data[1] !=
-       (kFeatureCount * kFeatureSize)) ||
-      (model_input->type != kTfLiteInt8)) {
-    MicroPrintf("Bad input tensor parameters in model");
+  // Log input tensor details
+  MicroPrintf("Input tensor type: %d, dimensions: %d", input->type, input->dims->size);
+  for (int i = 0; i < input->dims->size; i++) {
+    MicroPrintf("Input dimension %d: %d", i, input->dims->data[i]);
+  }
+
+  // Verify input tensor size matches expected size
+  if (input->bytes != kInputSize) {
+    MicroPrintf("Input tensor size (%d) does not match expected size (%d)",
+                input->bytes, kInputSize);
     return;
   }
-  model_input_buffer = tflite::GetTensorData<int8_t>(model_input);
+  MicroPrintf("Input size verified");
 
-  // Prepare to access the audio spectrograms from a microphone or other source
-  // that will provide the inputs to the neural network.
-  // NOLINTNEXTLINE(runtime-global-variables)
-  static FeatureProvider static_feature_provider(kFeatureElementCount,
-                                                 feature_buffer);
-  feature_provider = &static_feature_provider;
+  // Initialize inference counter
+  inference_count = 0;
 
-  static RecognizeCommands static_recognizer(error_reporter ,1000,200,500,3);
-  recognizer = &static_recognizer;
-
-  previous_time = 0;
+  // Mark setup as successful
+  setup_successful = true;
+  MicroPrintf("Micro Speech setup complete");
 }
 
-// The name of this function is important for Arduino compatibility.
-void loop() {
- 
-  // Fetch the spectrogram for the current time.
-  const int32_t current_time = LatestAudioTimestamp();
-  int how_many_new_slices = 0;
-  
-  TfLiteStatus feature_status = feature_provider->PopulateFeatureData(
-      previous_time, current_time, &how_many_new_slices);
-
-     MicroPrintf("features generted successfully");
-  if (feature_status != kTfLiteOk) {
-    MicroPrintf( "Feature generation failed");
-    return;
-  }
-  previous_time = current_time;
-  // If no new audio samples have been received since last time, don't bother
-  // running the network model.
-  if (how_many_new_slices == 0) {
+/* Loop function - runs once */
+void loop(void) {
+  if (!setup_successful) {
+    MicroPrintf("Setup failed, skipping loop");
     return;
   }
 
+  // Compute the size of the MFCC features
+  const int sample_data_size = g_yes_micro_f2e59fea_nohash_1_width * g_yes_micro_f2e59fea_nohash_1_height;
 
-  // Copy feature buffer to input tensor
-  for (int i = 0; i < kFeatureElementCount; i++) {
-    model_input_buffer[i] = feature_buffer[i];
+  // Load the preprocessed "yes" MFCC features into the input tensor
+  if (sample_data_size != input->bytes) {
+    MicroPrintf("Sample data size (%d) does not match input tensor size (%d)",
+                sample_data_size, input->bytes);
+    return;
   }
 
-  // Run the model on the spectrogram input and make sure it succeeds.
+  // Copy the sample data into the input tensor
+  for (int i = 0; i < input->bytes; i++) {
+    input->data.int8[i] = g_yes_micro_f2e59fea_nohash_1_data[i];
+  }
+
+  // Run inference
   TfLiteStatus invoke_status = interpreter->Invoke();
   if (invoke_status != kTfLiteOk) {
-    MicroPrintf( "Invoke failed");
+    MicroPrintf("Inference failed with status: %d", invoke_status);
     return;
   }
 
-  // Obtain a pointer to the output tensor
-  TfLiteTensor* output = interpreter->output(0);
-#if 1 // using simple argmax instead of recognizer
-  float output_scale = output->params.scale;
-  int output_zero_point = output->params.zero_point;
-  int max_idx = 0;
-  float max_result = 0.0;
-  // Dequantize output values and find the max
-  for (int i = 0; i < kCategoryCount; i++) {
-    float current_result =
-        (tflite::GetTensorData<int8_t>(output)[i] - output_zero_point) * // no declaration found for GetTensorData
-        output_scale;
-    if (current_result > max_result) {
-      max_result = current_result; // update max result
-      max_idx = i; // update category
-    }
-  }
-  if (max_result > 0.8f) {
-    MicroPrintf("Detected %7s, score: %.2f", kCategoryLabels[max_idx],
-        static_cast<double>(max_result));
-  }
-#else
-  // Determine whether a command was recognized based on the output of inference
-  const char* found_command = nullptr;
-  float score = 0;
-  bool is_new_command = false;
-  TfLiteStatus process_status = recognizer->ProcessLatestResults(
-      output, current_time, &found_command, &score, &is_new_command);
-  if (process_status != kTfLiteOk) {
-    MicroPrintf("RecognizeCommands::ProcessLatestResults() failed");
-    return;
-  }
-  // Do something based on the recognized command. The default implementation
-  // just prints to the error console, but you should replace this with your
-  // own function for a real application.
-  RespondToCommand(current_time, found_command, score, is_new_command);
-#endif
+  // Get the output scores (e.g., for "silence," "unknown," "yes," "no")
+  int8_t* output_data = output->data.int8;
+  float silence_score = (output_data[0] - output->params.zero_point) * output->params.scale;
+  float unknown_score = (output_data[1] - output->params.zero_point) * output->params.scale;
+  float yes_score = (output_data[2] - output->params.zero_point) * output->params.scale;
+  float no_score = (output_data[3] - output->params.zero_point) * output->params.scale;
+
+  // Pass results to the command responder
+  RespondToCommand(silence_score, unknown_score, yes_score, no_score);
+
+  // Increment inference counter
+  inference_count++;
+
+  MicroPrintf("Inference %d complete", inference_count);
 }

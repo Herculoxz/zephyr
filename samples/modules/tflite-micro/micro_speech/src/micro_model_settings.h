@@ -1,38 +1,28 @@
-/* Copyright 2023 The TensorFlow Authors. All Rights Reserved.
+#ifndef MICRO_MODEL_SETTINGS_H_
+#define MICRO_MODEL_SETTINGS_H_
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+// Number of labels the model can predict (silence, unknown, yes, no)
+constexpr int kLabelCount = 4;
 
-    http://www.apache.org/licenses/LICENSE-2.0
+// Labels for the output classes
+constexpr char kSilenceLabel[] = "silence";
+constexpr char kUnknownLabel[] = "unknown";
+constexpr char kYesLabel[] = "yes";
+constexpr char kNoLabel[] = "no";
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-==============================================================================*/
-
-#ifndef TENSORFLOW_LITE_MICRO_EXAMPLES_MICRO_SPEECH_MICRO_MODEL_SETTINGS_H_
-#define TENSORFLOW_LITE_MICRO_EXAMPLES_MICRO_SPEECH_MICRO_MODEL_SETTINGS_H_
-
-// The following values are derived from values used during model training.
-// If you change the way you preprocess the input, update all these constants.
-constexpr int kMaxAudioSampleSize = 512;
-constexpr int kAudioSampleFrequency = 16000;
-constexpr int kFeatureSize = 40;
-constexpr int kFeatureCount = 49;
-constexpr int kFeatureElementCount = (kFeatureSize * kFeatureCount);
-constexpr int kFeatureStrideMs = 20;
-constexpr int kFeatureDurationMs = 30;
-
-// Variables for the model's output categories.
-constexpr int kCategoryCount = 4;
-constexpr const char* kCategoryLabels[kCategoryCount] = {
-    "silence",
-    "unknown",
-    "yes",
-    "no",
+// Array of label names for easy access
+constexpr const char* kLabels[kLabelCount] = {
+    kSilenceLabel,
+    kUnknownLabel,
+    kYesLabel,
+    kNoLabel
 };
 
-#endif  // TENSORFLOW_LITE_MICRO_EXAMPLES_MICRO_SPEECH_MICRO_MODEL_SETTINGS_H_
+// Input tensor dimensions (adjust based on your model and yes_30ms_sample_data.cc)
+// Assuming 49 time steps x 40 MFCC coefficients, flattened
+constexpr int kInputSize = 49 * 40;  // 1960 elements
+
+// Tensor arena size (already defined in main_functions.cpp, but can be centralized here)
+constexpr int kTensorArenaSize = 100 * 1024;  // 10 KB, adjust as needed
+
+#endif  // MICRO_MODEL_SETTINGS_H_
